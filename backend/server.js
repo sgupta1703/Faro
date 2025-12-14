@@ -1,17 +1,23 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import dotenv from "dotenv";
 
-const YELP_API_KEY =
-  process.env.YELP_API_KEY ||
-  "1zlBAL67NBWyFQCM8lOBeylptoIrFoWQNBJv4Ew3zDyw7HPl55UO4vdqeV_COsdGdpGXsjCoAO4OA6VrEOzD_9lMYopznf1EiWSQGZ-0_iiMgTAmL8QiubK7pjI2aXYx";
+dotenv.config();
 
-const COHERE_API_KEY =
-  process.env.COHERE_API_KEY ||
-  "JhrZm8BvURROV94UJ9xHnLEozXMckcQcdJqaV6vJ";
+const YELP_API_KEY = process.env.YELP_API_KEY;
+const COHERE_API_KEY = process.env.COHERE_API_KEY;
 
 const app = express();
-app.use(cors());
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    methods: ["GET", "POST"],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
 
