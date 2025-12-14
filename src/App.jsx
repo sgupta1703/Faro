@@ -580,7 +580,7 @@ export default function App() {
           }}
         >
           <img
-            src="/src/assets/logo.png"
+            src="/logo.png"
             alt="Faro"
             style={{ height: 40, width: 40 }}
           />
