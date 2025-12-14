@@ -495,12 +495,11 @@ export default function App() {
         const { latitude, longitude } = position.coords;
 
         try {
-          const res = await fetch("http://localhost:5000/api/plan", {
+          const res = await fetch(`${process.env.RENDER_API_URL}/api/plan`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ prompt: input, latitude, longitude }),
           });
-
           const payload = await res.json();
           console.log("Received payload:", payload);
           setPlan(payload.plan);
