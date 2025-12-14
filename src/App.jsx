@@ -599,7 +599,7 @@ export default function App() {
 
       <div className={`slide ${screen === 0 ? "active" : ""}`}>
         <img 
-          src="/public/logo.png" 
+          src="/logo.png" 
           alt="Faro Logo" 
           style={{ marginBottom: 10, height: 100, width: 100, marginRight: 7 }}
         />
