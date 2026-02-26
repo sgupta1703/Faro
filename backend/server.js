@@ -11,7 +11,7 @@ const COHERE_API_KEY = process.env.COHERE_API_KEY;
 const app = express();
 
 /* =========================
-   PROPER MULTI-ORIGIN CORS
+   CORS CONFIG
 ========================= */
 
 const allowedOrigins = [
@@ -22,13 +22,12 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow non-browser requests (like Postman)
       if (!origin) return callback(null, true);
 
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       } else {
-        console.log("Blocked by CORS:", origin);
+        console.log("CORS BLOCKED:", origin);
         return callback(new Error("Not allowed by CORS"));
       }
     },
@@ -40,54 +39,68 @@ app.use(
 app.use(express.json());
 
 /* =========================
-   TAG EXTRACTION
+   TAG EXTRACTION (COHERE)
 ========================= */
 
 async function extractSearchTags(userPrompt) {
+  console.log("\n===== COHERE TAG EXTRACTION START =====");
+
   const prompt = `
-The user gave this mood or plan request:
+User mood/request:
 "${userPrompt}"
 
 Return ONLY a JSON array of 5 concise search tags.
 Example:
 ["romantic restaurant", "scenic park", "cozy cafe", "art museum", "wine bar"]
-
-Return EXACT format:
-["tag1", "tag2", "tag3", "tag4", "tag5"]
 `;
 
-  const response = await fetch("https://api.cohere.com/v1/chat", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${COHERE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "command-a-03-2025",
-      message: prompt,
-      preamble: "Return ONLY a JSON array.",
-      max_tokens: 100,
-      temperature: 0.2,
-    }),
-  });
-
-  const data = await response.json();
-  const text = data?.text || "";
-
   try {
+    const response = await fetch("https://api.cohere.com/v1/chat", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${COHERE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "command-a-03-2025",
+        message: prompt,
+        preamble: "Return ONLY a JSON array.",
+        max_tokens: 100,
+        temperature: 0.2,
+      }),
+    });
+
+    console.log("Cohere Status:", response.status);
+
+    const data = await response.json();
+    const text = data?.text || "";
+
+    console.log("Raw Cohere Tag Output:", text);
+
     const match = text.match(/\[(.*?)\]/s);
     const arr = JSON.parse(match[0]);
+
+    console.log("Parsed Tags:", arr);
+    console.log("===== COHERE TAG EXTRACTION END =====\n");
+
     return arr.slice(0, 5);
-  } catch {
+  } catch (err) {
+    console.log("COHERE TAG ERROR:", err);
     return ["restaurant", "coffee", "park"];
   }
 }
 
 /* =========================
-   YELP FETCH
+   YELP FETCH WITH DEBUG
 ========================= */
 
 async function fetchYelpPlaces({ term, latitude, longitude, limit = 5 }) {
+  console.log("\n===== YELP DEBUG START =====");
+  console.log("Search Term:", term);
+  console.log("Latitude:", latitude);
+  console.log("Longitude:", longitude);
+  console.log("API Key Exists:", !!YELP_API_KEY);
+
   const url = new URL("https://api.yelp.com/v3/businesses/search");
   url.searchParams.append("term", term);
   url.searchParams.append("latitude", latitude);
@@ -95,13 +108,49 @@ async function fetchYelpPlaces({ term, latitude, longitude, limit = 5 }) {
   url.searchParams.append("limit", String(limit));
   url.searchParams.append("sort_by", "best_match");
 
-  const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${YELP_API_KEY}` },
-  });
+  console.log("Full Yelp URL:", url.toString());
 
-  const json = await response.json();
-  return json.businesses || [];
+  try {
+    const response = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${YELP_API_KEY}` },
+    });
+
+    console.log("Yelp Response Status:", response.status);
+
+    const json = await response.json();
+
+    if (!response.ok) {
+      console.log("YELP ERROR RESPONSE:");
+      console.log(JSON.stringify(json, null, 2));
+      console.log("===== YELP DEBUG END =====\n");
+      return [];
+    }
+
+    console.log(
+      `Yelp returned ${json.businesses?.length || 0} businesses`
+    );
+
+    if (json.businesses?.length > 0) {
+      console.log(
+        "Sample:",
+        json.businesses[0].name,
+        "| Rating:",
+        json.businesses[0].rating
+      );
+    }
+
+    console.log("===== YELP DEBUG END =====\n");
+
+    return json.businesses || [];
+  } catch (err) {
+    console.log("YELP FETCH FAILED:", err);
+    return [];
+  }
 }
+
+/* =========================
+   UTILITIES
+========================= */
 
 function dedupeBusinesses(arr) {
   const seen = new Set();
@@ -134,66 +183,61 @@ function summarizeBusinessesForPrompt(businesses) {
       [b.location?.address1, b.location?.city, b.location?.state]
         .filter(Boolean)
         .join(", ") || null,
-    distance_meters: b.distance || null,
     coordinates: b.coordinates || null,
   }));
 }
 
 /* =========================
-   PLAN GENERATION
+   PLAN GENERATION (COHERE)
 ========================= */
 
 async function generatePlanWithCohere({ userPrompt, businessesSummary }) {
-  const prompt = `
-Create a detailed itinerary based on:
+  console.log("\n===== COHERE PLAN GENERATION START =====");
 
-User request:
+  const prompt = `
+Create an itinerary based on:
 "${userPrompt}"
 
 Available businesses:
 ${JSON.stringify(businessesSummary, null, 2)}
 
-Return ONLY valid JSON in this format:
-{
-  "title": "Name",
-  "description": "Short description",
-  "itinerary": [
-    {
-      "order": 1,
-      "place_name": "Exact business name",
-      "activity": "What to do",
-      "duration_minutes": 60,
-      "address": "Address",
-      "location": "City, State",
-      "details": "Extra details"
-    }
-  ]
-}
+Return ONLY valid JSON.
 `;
 
-  const response = await fetch("https://api.cohere.com/v1/chat", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${COHERE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "command-a-03-2025",
-      message: prompt,
-      preamble: "Return ONLY valid JSON.",
-      max_tokens: 900,
-      temperature: 0.6,
-    }),
-  });
-
-  const data = await response.json();
-  const text = data?.text || "";
-
   try {
+    const response = await fetch("https://api.cohere.com/v1/chat", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${COHERE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "command-a-03-2025",
+        message: prompt,
+        preamble: "Return ONLY valid JSON.",
+        max_tokens: 900,
+        temperature: 0.6,
+      }),
+    });
+
+    console.log("Cohere Status:", response.status);
+
+    const data = await response.json();
+    const text = data?.text || "";
+
+    console.log("Raw Cohere Plan Output:", text);
+
     const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     const jsonText = match ? match[1] : text;
-    return JSON.parse(jsonText.trim());
-  } catch {
+
+    const parsed = JSON.parse(jsonText.trim());
+
+    console.log("Plan Parsed Successfully");
+    console.log("===== COHERE PLAN GENERATION END =====\n");
+
+    return parsed;
+  } catch (err) {
+    console.log("COHERE PLAN ERROR:", err);
     return null;
   }
 }
@@ -205,6 +249,13 @@ Return ONLY valid JSON in this format:
 app.post("/api/plan", async (req, res) => {
   try {
     const { prompt, latitude, longitude } = req.body;
+
+    console.log("\n====================================");
+    console.log("NEW /api/plan REQUEST");
+    console.log("Prompt:", prompt);
+    console.log("Latitude:", latitude);
+    console.log("Longitude:", longitude);
+    console.log("====================================\n");
 
     const tags = await extractSearchTags(prompt);
 
@@ -218,8 +269,12 @@ app.post("/api/plan", async (req, res) => {
       allBusinesses.push(...results);
     }
 
+    console.log("Total businesses before dedupe:", allBusinesses.length);
+
     let cleaned = dedupeBusinesses(allBusinesses);
     cleaned = sortBusinesses(cleaned).slice(0, 9);
+
+    console.log("Total businesses after dedupe:", cleaned.length);
 
     const summary = summarizeBusinessesForPrompt(cleaned);
 
@@ -229,6 +284,7 @@ app.post("/api/plan", async (req, res) => {
     });
 
     if (!plan) {
+      console.log("Using fallback plan.");
       plan = {
         title: `Simple plan for ${prompt}`,
         itinerary: summary.slice(0, 3).map((b, i) => ({
