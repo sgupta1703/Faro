@@ -10,27 +10,49 @@ const COHERE_API_KEY = process.env.COHERE_API_KEY;
 
 const app = express();
 
+/* =========================
+   PROPER MULTI-ORIGIN CORS
+========================= */
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://faro-delta.vercel.app",
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL,
-    methods: ["GET", "POST"],
+    origin: function (origin, callback) {
+      // Allow non-browser requests (like Postman)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      } else {
+        console.log("Blocked by CORS:", origin);
+        return callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   })
 );
 
 app.use(express.json());
 
+/* =========================
+   TAG EXTRACTION
+========================= */
 
 async function extractSearchTags(userPrompt) {
   const prompt = `
 The user gave this mood or plan request:
 "${userPrompt}"
 
-Your task:
-Return ONLY a JSON array of 5 concise search tags that Yelp can use to find places that one would be interested in based on the user's mood or plan request.
-Example: ["romantic restaurant", "scenic park", "cozy cafe", "art museum", "wine bar"]
+Return ONLY a JSON array of 5 concise search tags.
+Example:
+["romantic restaurant", "scenic park", "cozy cafe", "art museum", "wine bar"]
 
-Return EXACT output format:
+Return EXACT format:
 ["tag1", "tag2", "tag3", "tag4", "tag5"]
 `;
 
@@ -52,26 +74,20 @@ Return EXACT output format:
   const data = await response.json();
   const text = data?.text || "";
 
-  console.log("\n===== COHERE TAG RAW OUTPUT =====");
-  console.log(text);
-  console.log("=================================\n");
-
   try {
     const match = text.match(/\[(.*?)\]/s);
     const arr = JSON.parse(match[0]);
-
-    console.log("Extracted Tags:", arr);
-
     return arr.slice(0, 5);
-  } catch (err) {
-    console.log("Failed to parse tags. Using fallback tags.");
+  } catch {
     return ["restaurant", "coffee", "park"];
   }
 }
 
-async function fetchYelpPlaces({ term, latitude, longitude, limit = 10 }) {
-  console.log(`\nQuerying Yelp for tag: "${term}"`);
+/* =========================
+   YELP FETCH
+========================= */
 
+async function fetchYelpPlaces({ term, latitude, longitude, limit = 5 }) {
   const url = new URL("https://api.yelp.com/v3/businesses/search");
   url.searchParams.append("term", term);
   url.searchParams.append("latitude", latitude);
@@ -84,11 +100,6 @@ async function fetchYelpPlaces({ term, latitude, longitude, limit = 10 }) {
   });
 
   const json = await response.json();
-
-  console.log(
-    `Yelp returned ${json.businesses?.length || 0} businesses for "${term}"`
-  );
-
   return json.businesses || [];
 }
 
@@ -103,8 +114,8 @@ function dedupeBusinesses(arr) {
 
 function sortBusinesses(arr) {
   return arr.sort((a, b) => {
-    const ra = b.rating - a.rating;
-    if (ra !== 0) return ra;
+    const ratingDiff = b.rating - a.rating;
+    if (ratingDiff !== 0) return ratingDiff;
     return (a.distance || 999999) - (b.distance || 999999);
   });
 }
@@ -128,33 +139,37 @@ function summarizeBusinessesForPrompt(businesses) {
   }));
 }
 
-async function generatePlanWithCohere({ userPrompt, businessesSummary }) {
-  const prompt = `You are an itinerary planner. Create a detailed itinerary based on the user's mood/request and the available nearby businesses.
+/* =========================
+   PLAN GENERATION
+========================= */
 
-User mood/request:
+async function generatePlanWithCohere({ userPrompt, businessesSummary }) {
+  const prompt = `
+Create a detailed itinerary based on:
+
+User request:
 "${userPrompt}"
 
-Available nearby businesses:
+Available businesses:
 ${JSON.stringify(businessesSummary, null, 2)}
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON in this format:
 {
-  "title": "Name of the itinerary",
-  "description": "Brief description",
+  "title": "Name",
+  "description": "Short description",
   "itinerary": [
     {
       "order": 1,
-      "place_name": "Name of the place",
-      "activity": "What to do there",
+      "place_name": "Exact business name",
+      "activity": "What to do",
       "duration_minutes": 60,
-      "address": "Street address",
+      "address": "Address",
       "location": "City, State",
-      "details": "Any additional details"
+      "details": "Extra details"
     }
   ]
 }
-
-Make sure each activity in the itinerary matches one of the provided businesses. Use their exact names and addresses.`;
+`;
 
   const response = await fetch("https://api.cohere.com/v1/chat", {
     method: "POST",
@@ -165,7 +180,7 @@ Make sure each activity in the itinerary matches one of the provided businesses.
     body: JSON.stringify({
       model: "command-a-03-2025",
       message: prompt,
-      preamble: "Only return valid JSON in the requested format. Do not add any other text.",
+      preamble: "Return ONLY valid JSON.",
       max_tokens: 900,
       temperature: 0.6,
     }),
@@ -174,151 +189,24 @@ Make sure each activity in the itinerary matches one of the provided businesses.
   const data = await response.json();
   const text = data?.text || "";
 
-  console.log("\n===== COHERE PLAN RAW OUTPUT =====");
-  console.log(text);
-  console.log("=================================\n");
-
   try {
     const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     const jsonText = match ? match[1] : text;
-
-    const plan = JSON.parse(jsonText.trim());
-
-    console.log("Cohere plan parsed successfully.");
-    return plan;
-  } catch (err) {
-    console.log("Failed to parse plan JSON from Cohere.");
+    return JSON.parse(jsonText.trim());
+  } catch {
     return null;
   }
 }
 
-function generateFallbackPlan({ userPrompt, businessesSummary, startCoords }) {
-  console.log("Using fallback plan.");
-
-  const picks = businessesSummary.slice(0, 3);
-
-  return {
-    title: `Simple plan for ${userPrompt}`,
-    mood_prompt: userPrompt,
-    total_estimated_minutes: picks.length * 60,
-    itinerary: picks.map((p, i) => ({
-      order: i + 1,
-      place_id: p.id,
-      place_name: p.name,
-      activity: `Visit ${p.name}.`,
-      suggested_start_time: null,
-      duration_minutes: 60,
-      address: p.address,
-      location: p.address,
-      details: `Rating: ${p.rating}`,
-      latitude: p.coordinates?.latitude || null,
-      longitude: p.coordinates?.longitude || null,
-    })),
-    start_location: {
-      latitude: startCoords?.latitude || null,
-      longitude: startCoords?.longitude || null,
-      location: "Your Location",
-    },
-    alternatives: businessesSummary.slice(3, 6).map((b) => b.name),
-    why_this_matches_mood: "Based on top nearby places.",
-  };
-}
-
-
-function enrichPlanItineraryWithCoords(plan, cleanedBusinesses, startCoords) {
-  if (!plan) return plan;
-
-  if (!plan.itinerary && plan.steps) {
-    plan.itinerary = plan.steps;
-  }
-  if (!plan.itinerary && plan.activities) {
-    plan.itinerary = plan.activities;
-  }
-
-  if (!Array.isArray(plan.itinerary)) {
-    plan.itinerary = [];
-  }
-
-  const normalized = (s) =>
-    (s || "").toString().replace(/[^a-z0-9\s]/gi, "").toLowerCase();
-
-  const bizIndex = cleanedBusinesses.map((b) => {
-    return {
-      id: b.id,
-      name: normalized(b.name || ""),
-      address: normalized(
-        [b.location?.address1, b.location?.city, b.location?.state]
-          .filter(Boolean)
-          .join(" ")
-      ),
-      coords: b.coordinates || null,
-      raw: b,
-    };
-  });
-
-  const tryFind = (text) => {
-    if (!text) return null;
-    const t = normalized(text);
-    let found =
-      bizIndex.find((b) => b.name && t.includes(b.name)) ||
-      bizIndex.find((b) => b.name && b.name.includes(t));
-    if (found) return found;
-
-    found =
-      bizIndex.find((b) => b.address && t.includes(b.address)) ||
-      bizIndex.find((b) => b.address && b.address.includes(t));
-    if (found) return found;
-
-    const tokens = t.split(/\s+/).filter(Boolean);
-    if (tokens.length > 0) {
-      found = bizIndex.find((b) =>
-        tokens.some((tk) => b.name.includes(tk) || b.address.includes(tk))
-      );
-    }
-    return found || null;
-  };
-
-  plan.itinerary = plan.itinerary.map((step) => {
-    const searchable = [step.location, step.activity, step.details, step.place_name, step.address]
-      .filter(Boolean)
-      .join(" - ");
-    const match = tryFind(searchable);
-
-    if (match && match.coords && match.coords.latitude && match.coords.longitude) {
-      return {
-        ...step,
-        latitude: match.coords.latitude,
-        longitude: match.coords.longitude,
-        matched_business_id: match.id,
-      };
-    }
-
-    return {
-      ...step,
-      latitude: step.latitude || null,
-      longitude: step.longitude || null,
-    };
-  });
-
-  plan.start_location = {
-    latitude: startCoords?.latitude || null,
-    longitude: startCoords?.longitude || null,
-    location: "Your Location", 
-  };
-
-  return plan;
-}
+/* =========================
+   ROUTE
+========================= */
 
 app.post("/api/plan", async (req, res) => {
   try {
     const { prompt, latitude, longitude } = req.body;
-    console.log("\n===============================");
-    console.log("New Request:", prompt);
-    console.log("===============================");
 
     const tags = await extractSearchTags(prompt);
-
-    console.log("\nFinal Tags Used:", tags);
 
     let allBusinesses = [];
     for (const tag of tags) {
@@ -326,20 +214,12 @@ app.post("/api/plan", async (req, res) => {
         term: tag,
         latitude,
         longitude,
-        limit: 5,
       });
       allBusinesses.push(...results);
     }
 
-    console.log(`\nTotal merged businesses: ${allBusinesses.length}`);
-
     let cleaned = dedupeBusinesses(allBusinesses);
-    console.log(`After dedupe: ${cleaned.length}`);
-
-    cleaned = sortBusinesses(cleaned);
-    cleaned = cleaned.slice(0, 9);
-
-    console.log(`Final top results: ${cleaned.length}`);
+    cleaned = sortBusinesses(cleaned).slice(0, 9);
 
     const summary = summarizeBusinessesForPrompt(cleaned);
 
@@ -349,40 +229,35 @@ app.post("/api/plan", async (req, res) => {
     });
 
     if (!plan) {
-      plan = generateFallbackPlan({
-        userPrompt: prompt,
-        businessesSummary: summary,
-        startCoords: { latitude, longitude },
-      });
-    } else {
-      try {
-        plan = enrichPlanItineraryWithCoords(plan, cleaned, {
-          latitude,
-          longitude,
-        });
-      } catch (err) {
-        console.log("Failed to enrich plan with coords:", err);
-      }
+      plan = {
+        title: `Simple plan for ${prompt}`,
+        itinerary: summary.slice(0, 3).map((b, i) => ({
+          order: i + 1,
+          place_name: b.name,
+          activity: `Visit ${b.name}`,
+          duration_minutes: 60,
+          address: b.address,
+          location: b.address,
+          details: `Rating: ${b.rating}`,
+        })),
+      };
     }
-
-    console.log("Sending plan back:", JSON.stringify(plan, null, 2));
 
     return res.json({
       spots: cleaned,
       plan,
-      debug: {
-        extracted_tags: tags,
-        total_raw_businesses: allBusinesses.length,
-        deduped_businesses: cleaned.length,
-      },
     });
   } catch (err) {
-    console.log("SERVER ERROR:", err);
+    console.error("SERVER ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+/* =========================
+   START SERVER
+========================= */
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`\nServer running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
